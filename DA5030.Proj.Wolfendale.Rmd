@@ -15,35 +15,144 @@ geometry:
   - margin=0.7in
 ---
 
+```{r libs}
+library(tidyverse)
+library(assertr)
+library(knitr)
+```
+
 ## Introduction
 
 ## Buisness Understanding
 
 ## Data Understanding
 
-```{r, read_in}
+```{r read_in}
 raw_data <- read.csv(
     "risk_factors_cervical_cancer.csv",
     strip.white = TRUE,
-    na.strings  = "?",    
+    na.strings  = "?",
+    col.names   = c(
+        "age",
+        "n_sexual_partners",
+        "age_first_sexual_intercourse",
+        "n_pregnancies",
+        "smokes",
+        "n_years_smokes",
+        "n_packs_per_year",
+        "hormonal_contraceptives",
+        "n_years_hormonal_contraceptives",
+        "iud",
+        "n_years_iud",
+        "std",
+        "n_stds",
+        "std_condylomatosis",
+        "std_cervical_condylomatosis",
+        "std_vaginal_condylomatosis",
+        "std_vulvo_perineal_condylomatosis",
+        "std_syphilis",
+        "std_pelvic_inflammatory_disease",
+        "std_genital_herpes",
+        "std_molluscum_contagiosum",
+        "std_aids",
+        "std_hiv",
+        "std_hepatitis_b",
+        "std_hpv",
+        "n_std_diagnosis",
+        "n_years_since_first_std",
+        "n_years_since_last_std",
+        "prev_dx_cancer",
+        "prev_dx_cin",
+        "prev_dx_hpv",
+        "dx_cervical_cancer",
+        "hinselmann",
+        "schiller",
+        "citology",
+        "biopsy"  
+    )
 )
 str(raw_data)
 ```
 
-```{r, n_miss}
+```{r n_miss}
 sapply(raw_data, function(x) sum(is.na(x)))
 ```
 
 ## Data Preparation
 
-```{r, limit_vars}
+```{r limit_vars}
 drop_vars <- c(
-    "Dx",
-    "Dx.CIN",
-    "Dx.HPV",
-    "Biopsy",
-    "Hinselmann"
+    "biopsy",
+    "hinselmann",
+    "schiller",
+    "citology"
 )
+
+raw_data <- raw_data %>% 
+    select(-one_of(drop_vars))
+```
+
+```{r zscore}
+standardize <- function(x) {
+    return ((x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
+}
+```
+
+
+```{r find_outliers}
+cont_vars <- c(
+    "age",
+    "n_sexual_partners",
+    "age_first_sexual_intercourse",
+    "n_pregnancies",
+    "n_years_smokes",
+    "n_packs_per_year",
+    "n_years_hormonal_contraceptives",
+    "n_years_iud",
+    "n_stds",
+    "n_std_diagnosis",
+    "n_years_since_first_std",
+    "n_years_since_last_std"
+)
+
+# create z-scores for continuous variables
+raw_z <- as.data.frame(
+    lapply(
+        raw_data[, cont_vars], 
+        standardize
+    )
+)
+```
+
+```{r examine_outliers}
+kable(table(raw_data$n_pregnancies),   col.name = c("n_pregnancies",  "Freq"))
+summary(raw_z$n_pregnancies)
+
+kable(table(raw_data$n_std_diagnosis), col.name = c("n_std_diagnosis","Freq"))
+summary(raw_z$n_std_diagnosis)
+
+summary(raw_data$age)
+summary(raw_z$age)
+
+raw_z %>% 
+    mutate_all(funs(ifelse(abs(.) > 8, 1, 0))) %>% 
+    summarize_all(sum, na.rm = TRUE) %>% 
+    gather(key = variable, value = n_outliers) %>% 
+    kable()
+```
+
+```{r elim_outliers}
+raw_z <- as.data.frame(lapply(raw_z, function(x) ifelse(abs(x) > 8, NA, x)))
+
+raw_data[which(is.na(raw_z$n_pregnancies)),   ]$n_pregnancies   <- NA
+raw_data[which(is.na(raw_z$n_years_smokes)),  ]$n_years_smokes  <- NA
+raw_data[which(is.na(raw_z$n_years_iud)),     ]$n_years_iud     <- NA
+raw_data[which(is.na(raw_z$n_std_diagnosis)), ]$n_std_diagnosis <- NA
+```
+
+```{r binary_vars}
+raw_data %>% 
+    assert(in_set(0, 1, NA), -one_of(cont_vars), success_fun = success_logical)
 ```
 
 
