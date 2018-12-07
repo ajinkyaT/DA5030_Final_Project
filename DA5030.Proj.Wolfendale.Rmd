@@ -1,0 +1,55 @@
+---
+title: "Project Title"
+subtitle: "DA5030 Intro to Machine Learning & Data Mining"
+author: 
+  - "Clare Wolfendale"
+  - "Wolfendale.C@husky.neu.edu"
+  - "Fall 2018 Signature Assignment"
+date: "December 9, 2018"
+subparagraph: true
+output: pdf_document
+documentclass: report
+fontsize: 12pt
+urlcolor: blue
+geometry:
+  - margin=0.7in
+---
+
+## Introduction
+
+## Buisness Understanding
+
+## Data Understanding
+
+```{r, read_in}
+raw_data <- read.csv(
+    "risk_factors_cervical_cancer.csv",
+    strip.white = TRUE,
+    na.strings  = "?",    
+)
+str(raw_data)
+```
+
+```{r, n_miss}
+sapply(raw_data, function(x) sum(is.na(x)))
+```
+
+## Data Preparation
+
+```{r, limit_vars}
+drop_vars <- c(
+    "Dx",
+    "Dx.CIN",
+    "Dx.HPV",
+    "Biopsy",
+    "Hinselmann"
+)
+```
+
+
+## Modeling
+
+## Evaluation
+
+## Deployment
+
