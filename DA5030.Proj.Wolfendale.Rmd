@@ -1,5 +1,5 @@
 ---
-title: "Project Title"
+title: "Predicting cervical cancer diagnosis from risk factor data"
 subtitle: "DA5030 Intro to Machine Learning & Data Mining"
 author: 
   - "Clare Wolfendale"
@@ -15,20 +15,39 @@ geometry:
   - margin=0.7in
 ---
 
+Imports libraries used in report.
+
 ```{r libs}
 library(tidyverse)
 library(assertr)
 library(knitr)
+library(psych)
+library(caret)
 library(e1071)
 library(C50)
 library(gmodels)
+library(pROC)
 ```
 
-## Introduction
+## Business Understanding
 
-## Buisness Understanding
+The goal of this project is to examine how predictive cervical cancer risk factors are of a cervical cancer diagnosis. Specifically, I will attempt to use patient data on cervical cancer risk factors to train machine learning models to predict a patient's cervical cancer diagnosis.
+
+The Human papillomavirus (HPV) is one of the primary risk factors for cervical cancer. HPV can weaken the immune system and result in the growth of cancerous cells on the cervix. The risk factors for HPV include behaviors that may result in a greater chance of acquiring HPV, such as many sexual partners, sexual activity at an early age, or having STDs such as syphilis or HIV/AIDS[^1].
+
+Getting vaccinated against HPV, having routine Pap tests, and practicing safe sex can all reduce the risk of cervical cancer. Additionally, not smoking can also reduce risk, as smoking can also cause the growth of cancerous cells on the cervix[^1].
+
+The machine learning models developed in this report will use data on cervical cancer risk factors to predict whether a patient is likely to be diagnosed with cervical cancer. The goal is to build classification models that could alert doctors to patients with a high risk of cervical cancer, who may need more frequent screenings or other interventions. 
+
+[^1]: "Cervical Cancer." Mayo Clinic, Mayo Foundation for Medical Education and Research, 23 Aug. 2017, [www.mayoclinic.org/diseases-conditions/cervical-cancer/symptoms-causes/syc-20352501](www.mayoclinic.org/diseases-conditions/cervical-cancer/symptoms-causes/syc-20352501).
 
 ## Data Understanding
+
+To build the model, I will use the [Cervical Cancer data set from the UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/Cervical+cancer+%28Risk+Factors%29)[^2]. Cervical cancer diagnosis will be predicted from demographics, behavioral information, and medical records collected from a sample of 858 patients at the Hospital Universitario de Caracas in Caracas, Venezuela. 
+
+[^2]: Kelwin Fernandes, Jaime S. Cardoso, and Jessica Fernandes. "Transfer Learning with Partial Observability Applied to Cervical Cancer Screening." Iberian Conference on Pattern Recognition and Image Analysis. Springer International Publishing, 2017.
+
+Read the cervical cancer data into R. Rename features to a shorter variable names and convert "?" to missing code `NA`.
 
 ```{r read_in}
 raw_data <- read.csv(
@@ -67,44 +86,121 @@ raw_data <- read.csv(
         "prev_dx_cancer",
         "prev_dx_cin",
         "prev_dx_hpv",
-        "prev_dx",
+        "dx",
         "hinselmann",
         "schiller",
         "citology",
         "biopsy"  
     )
 )
+```
+
+### Data description
+
+The data is provided in a comma-separated value file. It contains `r nrow(raw_data)` observations and `r ncol(raw_data)` features. The level of the file is one observation for each patient in the sample.
+
+```{r examine}
 str(raw_data)
 ```
 
-```{r n_miss}
-sapply(raw_data, function(x) sum(is.na(x)))
-```
-
-## Data Preparation
+The target variable is whether the patient was diagnosed with cervical cancer. The data set contains variables that describe the type of biopsy performed to diagnose the cervical cancer. The max of these biopsy variables will be the indicator for cervical cancer status.
 
 ```{r target_var}
 raw_data <- raw_data %>% 
     rowwise() %>% 
     mutate(cancer = max(biopsy, hinselmann, schiller, citology)) %>% 
     ungroup() %>% 
-    select(-biopsy, -hinselmann, -schiller, -citology)
+    select(-biopsy, -hinselmann, -schiller, -citology, -dx)
+```
 
+About `r round(100*mean(raw_data$cancer), digits = 0)` percent of patients in the data have been diagnosed with cervical cancer.
+
+```{r}
 # convert to factor variable
 raw_data$cancer <- factor(raw_data$cancer, levels = c(0,1), labels = c("no", "yes"))
 
 table(raw_data$cancer)
+prop.table(table(raw_data$cancer))
 ```
 
-```{r zscore}
-standardize <- function(x) {
-    return ((x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
-}
+### Explore data
+
+#### Demographics
+
+The demographics in the data set includes patient age (`age`). Patients in the file range from ages `r min(raw_data$age, na.rm = TRUE)` to `r max(raw_data$age, na.rm = TRUE)`.
+
+```{r explore_age}
+summary(raw_data$age)
 ```
 
+#### Behavioral data
 
-```{r find_outliers}
-cont_vars <- c(
+The behavioral features in the data set includes information collected on smoking habits and patient sexual history. Key variables include the number of years the patient has smoked and the patient's number of sexual partners. We can examine the distribution of both of these variables using histograms.
+
+```{r histograms, fig.height= 4, fig.width = 4}
+# histogram for number of years smoked
+raw_data %>% 
+    filter(!is.na(n_years_smokes)) %>% 
+    ggplot(aes(x = floor(n_years_smokes))) +
+    xlab("Number of years smoked") +
+    ylab("Count") +
+    ggtitle("Histogram of number of years smoked") +
+    geom_histogram()
+
+# histogram for number of sexual partners
+raw_data %>% 
+    filter(!is.na(n_sexual_partners)) %>% 
+    ggplot(aes(x = floor(n_sexual_partners))) +
+    xlab("Number of sexual partners") +
+    ylab("Count") +
+    ggtitle("Histogram of number of sexual partners") +
+    geom_histogram()
+```
+
+The distribution of both features are right-skewed. That is, they have a tail to the right. Neither feature is normally distributed. 
+
+#### Medical records data
+
+The medical records data includes information about patient medical history such as previous cervical cancer diagnosis (`prev_dx_cancer`), previous HPV diagnosis (`prev_dx_hpv`), and previous cervical intraepithelial neoplasia diagnosis (`prev_dx_cin`). Since HPV and CIN are both causes of cervical cancer, we expect that some of these variables could be highly-correlated with each other or with the target variable. We can create scatter plots and pairwise correlations between these variables using the `pairs.panels()` function from the `pysch` package.
+
+```{r scatter}
+pairs.panels(raw_data[c("cancer","prev_dx_cancer","prev_dx_hpv","prev_dx_cin")])
+```
+
+The correlation between `prev_dx_hpv` and `prev_dx_cancer` is `r round(cor(raw_data$prev_dx_hpv, raw_data$prev_dx_cancer), digits = 2)`. It follows that there is a strong positive correlation between previous HPV status and previous cervical cancer status. None of these variables appear to be highly-correlated with the target variable.
+
+The medical records data also includes indicators for various STDs. Some of the indicators for STD are very rare. For example, the variable (`std_hepatitis_b`) denotes that only `r sum(raw_data$std_hepatitis_b, na.rm = TRUE)` patient has Hepatitis B in the data set.
+
+Calculate the number of instances of each STD by summing each STD variable in the data set.
+
+```{r rare_vars}
+# selects only STD indicators into a data set
+std_vars <- raw_data %>% 
+    select(starts_with("std_"))
+
+# sums number of instances of each STD
+sum_std_vars <- as.data.frame(
+    lapply(
+        std_vars, 
+        function(x) sum(x, na.rm = TRUE)
+    )
+)
+
+# displays number of instances
+sum_std_vars <- sum_std_vars %>% 
+    gather(key = variable, value = n_instances) 
+kable(sum_std_vars)
+```
+
+Because some STDs occur very rarely, these variables may skew the results models that are susceptible to being biased by noisy data.
+
+### Verify data quality
+
+The data set requires little data cleaning. It already contains one record per patient and all features are either numeric or categorical variables. All categorical variables are all coded as binary variables. We can confirm this with an assertion that all variables aside from the numeric variables have values `0`, `1`, or `NA`.
+
+```{r binaries}
+# list of numeric variables in the data
+num_vars <- c(
     "age",
     "n_sexual_partners",
     "age_first_sexual_intercourse",
@@ -119,74 +215,126 @@ cont_vars <- c(
     "n_years_since_last_std"
 )
 
-# create z-scores for continuous variables
+# assert all remaining variables are 0/1 binaries
+raw_data %>% 
+    assert(in_set(0, 1, NA), -one_of(c(num_vars,"cancer")), success_fun = success_logical)
+```
+
+There is one significant data quality issue in the data set. Due to the sensitive nature of the data collected, there are missing values from patients declining to answer certain questions. 
+
+Calculate the missing rate for each variable (aside from the target variable).
+
+```{r miss_rates}
+# calculate missing rates for each variable
+miss_rates <- as.data.frame(
+    lapply(
+        raw_data[, !names(raw_data) %in% c("cancer")], 
+        function(x) round(100*mean(is.na(x), digits = 0))
+    )
+)
+
+# displays missing rates
+miss_rates <- miss_rates %>% 
+    gather(key = variable, value = missing_rate)
+kable(miss_rates)
+```
+
+The missing rates range between `r min(miss_rates$missing_rate)` and `r max(miss_rates$missing_rate)`. Some variables such as `n_years_since_first_std` and `n_years_since_last_std` have too high of a missing rate to be usable. These variables will need to be removed from the data. The other variables can be imputed in order to minimize loss of information in the data set from missing values.
+
+## Data Preparation
+
+### Select data for model
+
+Due to the rarity of some of the STD indicators, the rarest indicators will be removed from the data set. These variables are unlikely to be representative of the sample after the data is partitioned into testing and training data sets, and may bias the results. 
+
+Remove STDs variables with ten or fewer instances.
+
+```{r drop_rare_vars}
+# selects names of variables with 10 or fewer instances 
+drop_vars <- sum_std_vars %>% 
+    filter(n_instances <= 10) %>% 
+    select(variable)
+kable(drop_vars)
+
+# drop variables from data
+dx_data <- raw_data %>% 
+    select(-one_of(drop_vars$variable))
+```
+
+We will also remove variables with too high a missing rate to be imputed. 
+
+Drop variables with a missing rate greater than 15 percent.
+
+```{r drop_miss_vars}
+# selects names of variables with 10 or fewer instances 
+drop_vars <- miss_rates %>% 
+    filter(missing_rate > 15) %>% 
+    select(variable)
+kable(drop_vars)
+
+# drop variables from data
+dx_data <- dx_data %>% 
+    select(-one_of(drop_vars$variable))
+```
+
+Examine the variables remaining in the data set. The data set now has `r ncol(dx_data)` features.
+
+```{r keep_vars}
+str(dx_data)
+```
+
+### Clean data for model
+
+__Eliminate outliers.__ Prior to training the classifier models, we should examine and remove any problematic outlier values from the data. We can check numeric variables for outliers by converting the variables to z-scores and identifying extreme values for removal. 
+
+First, define a function to convert a variable to a z-score.
+
+```{r zscore_fun}
+standardize <- function(x) {
+    return ((x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
+}
+```
+
+Next, convert all of the numeric variables to z-scores.
+
+```{r find_outliers}
 raw_z <- as.data.frame(
     lapply(
-        raw_data[, cont_vars], 
+        raw_data[, num_vars], 
         standardize
     )
 )
 ```
 
-```{r examine_outliers}
-kable(table(raw_data$n_pregnancies),   col.name = c("n_pregnancies",  "Freq"))
+Examine the raw and standardized versions of `n_pregnancies`.
+
+```{r examine_outliers1}
+kable(table(raw_data$n_pregnancies), col.name = c("n_pregnancies", "Freq"))
 summary(raw_z$n_pregnancies)
+```
 
-kable(table(raw_data$n_std_diagnosis), col.name = c("n_std_diagnosis","Freq"))
+Examine the raw and standardized versions of `n_std_diagnosis`.
+
+```{r examine_outliers2}
+kable(table(raw_data$n_std_diagnosis), col.name = c("n_std_diagnosis", "Freq"))
 summary(raw_z$n_std_diagnosis)
+```
 
-summary(raw_data$age)
-summary(raw_z$age)
+One convention for outlier detection is to remove values with z-scores greater than 3 or less than -3. Calculate the number of observations that have a z-score either greater than 3 or less than -3.
 
+```{r n_outliers}
 raw_z %>% 
-    mutate_all(funs(ifelse(abs(.) > 8, 1, 0))) %>% 
+    mutate_all(funs(ifelse(abs(.) > 3, 1, 0))) %>% 
     summarize_all(sum, na.rm = TRUE) %>% 
     gather(key = variable, value = n_outliers) %>% 
     kable()
 ```
 
-```{r elim_outliers}
-raw_z <- as.data.frame(
-    lapply(
-        raw_z, 
-        function(x) ifelse(abs(x) > 8, NA, x)
-    )
-)
+There are large number of observations with z-score values greater than 3. We determined in the data exploration that some feature in our data have skewed distributions. It follows that some of the values we are observing with high z-score are not actually outliers. Therefore, we will not remove any outliers from the data. There is not significant evidence determine that these values are errors.
 
-dx_data <- raw_data
+__Impute missing values.__ Because features in our data have a skewed distribution, we will impute missing values for a variable with its median. The median is less susceptible to being influenced by extreme values than a measure such as the mean. 
 
-dx_data[which(is.na(raw_z$n_pregnancies)),   ]$n_pregnancies   <- NA
-dx_data[which(is.na(raw_z$n_years_smokes)),  ]$n_years_smokes  <- NA
-dx_data[which(is.na(raw_z$n_years_iud)),     ]$n_years_iud     <- NA
-dx_data[which(is.na(raw_z$n_std_diagnosis)), ]$n_std_diagnosis <- NA
-```
-
-
-```{r binary_vars}
-dx_data %>% 
-    assert(in_set(0, 1, NA), -one_of(c(cont_vars,"cancer")), success_fun = success_logical)
-```
-
-```{r drop_vars}
-miss_rates <- as.data.frame(
-    lapply(
-        dx_data, 
-        function(x) round(100*mean(is.na(x), digits = 1))
-    )
-)
-
-drop_vars <- miss_rates %>% 
-    gather(key = variable, value = miss_rate) %>% 
-    filter(miss_rate > 15) %>% 
-    select(variable)
-
-drop_vars
-
-dx_data <- dx_data %>% 
-    select(-one_of(drop_vars$variable))
-
-str(dx_data)
-```
+First, define a function to impute a variable with its median.
 
 ```{r impute_fun}
 impute_var <- function(var) {
@@ -200,70 +348,103 @@ impute_var <- function(var) {
 }
 ```
 
+Next, apply the function to all variables in the data set other than the target variable.
+
 ```{r impute_vars}
-# store target variable separately
+# stores target variable separately
 dx_labels <- dx_data$cancer
 
+# imuptes all other variables in the data set
 dx_data <- as.data.frame(
     lapply(
         dx_data[, !names(dx_data) %in% c("cancer")], 
         impute_var
     )
 )
+```
 
-# confirm no more missing values
+Confirm no missing values remain after the imputation.
+
+```{r check_impute}
+# calculate number of missing vales
 sapply(dx_data, function(x) sum(is.na(x)))
 
+# assert no missing values remain
 vars <- colnames(dx_data)
-
 dx_data %>% 
     assert(not_na, one_of(vars), success_fun = success_logical)
 ```
 
-```{r bin_age}
-bayes_data <- dx_data
+### Feature engineering
 
+One of the classification algorithms that will be used to predict cervical cancer diagnosis is the Naive Bayes algorithm. This algorithm assumes that the data contains categorical features. Since the cervical cancer data set contains some numeric features, these features much be discretized prior to training the model. We can discretize these features by binning the numbers into categories.
+
+First, store the data for the Naive Bayes algorithm in separate data frame. The numeric features will need to be maintain for the other machine learning algorithms.
+
+```{r bayes_date}
+bayes_data <- dx_data
+```
+
+Bin age.
+
+```{r bin_age}
 bayes_data$age_bin[bayes_data$age > 0  & bayes_data$age <= 20] <- 1
 bayes_data$age_bin[bayes_data$age > 20 & bayes_data$age <= 30] <- 2
 bayes_data$age_bin[bayes_data$age > 30 & bayes_data$age <= 40] <- 3
-bayes_data$age_bin[bayes_data$age > 41                       ] <- 4
+bayes_data$age_bin[bayes_data$age > 40                       ] <- 4
 
+# store as factor variable
 bayes_data$age_fac <- factor(
     bayes_data$age_bin, 
     levels = c(1,2,3,4), 
-    labels = c("lt 20", "21 to 30", "31 to 40", "gt 40")
+    labels = c("lt 20", "21 to 30", "31 to 40", "41+")
 )
+
+# check coding
 table(bayes_data$age_fac)
 ```
 
-```{r bin_n_partners}
-bayes_data$n_sexual_partners_bin[bayes_data$n_sexual_partners <= 3] <- 1
-bayes_data$n_sexual_partners_bin[bayes_data$n_sexual_partners  > 3] <- 2
+Bin number of sexual partners.
 
+```{r bin_n_partners}
+bayes_data$n_sexual_part_bin[bayes_data$n_sexual_partners == 0] <- 0
+bayes_data$n_sexual_part_bin[bayes_data$n_sexual_partners == 1] <- 1
+bayes_data$n_sexual_part_bin[bayes_data$n_sexual_partners == 2] <- 2
+bayes_data$n_sexual_part_bin[bayes_data$n_sexual_partners == 3] <- 3
+bayes_data$n_sexual_part_bin[bayes_data$n_sexual_partners  > 3] <- 4
+
+# store as factor variable
 bayes_data$n_sexual_partners_fac <- factor(
-    bayes_data$n_sexual_partners_bin, 
-    levels = c(1,2), 
-    labels = c("lt 3", "gt 3")    
+    bayes_data$n_sexual_part_bin, 
+    levels = c(0:4), 
+    labels = c("0", "1","2","3","4+")    
 )
 
+# check coding
 table(bayes_data$n_sexual_partners_fac)
 ```
 
-```{r bin_age_first_sex}
-bayes_data$age_first_sexual_intercourse_bin[bayes_data$age_first_sexual_intercourse <= 15] <- 1
-bayes_data$age_first_sexual_intercourse_bin[bayes_data$age_first_sexual_intercourse == 16] <- 2
-bayes_data$age_first_sexual_intercourse_bin[bayes_data$age_first_sexual_intercourse == 17] <- 3
-bayes_data$age_first_sexual_intercourse_bin[bayes_data$age_first_sexual_intercourse == 18] <- 4
-bayes_data$age_first_sexual_intercourse_bin[bayes_data$age_first_sexual_intercourse >= 19] <- 5
+Bin age at first sexual intercourse.
 
+```{r bin_age_first_sex}
+bayes_data$age_first_sexual_ic_bin[bayes_data$age_first_sexual_intercourse <= 15] <- 1
+bayes_data$age_first_sexual_ic_bin[bayes_data$age_first_sexual_intercourse == 16] <- 2
+bayes_data$age_first_sexual_ic_bin[bayes_data$age_first_sexual_intercourse == 17] <- 3
+bayes_data$age_first_sexual_ic_bin[bayes_data$age_first_sexual_intercourse == 18] <- 4
+bayes_data$age_first_sexual_ic_bin[bayes_data$age_first_sexual_intercourse >= 19] <- 5
+
+# store as factor variable
 bayes_data$age_first_sexual_intercourse_fac <- factor(
-    bayes_data$age_first_sexual_intercourse_bin, 
+    bayes_data$age_first_sexual_ic_bin, 
     levels = c(1,2,3,4,5), 
-    labels = c("lt 15", "16", "17", "18", "gt 19")    
+    labels = c("lt 15", "16", "17", "18", "19+")    
 )
 
+# check coding
 table(bayes_data$age_first_sexual_intercourse_fac)
 ```
+
+Bin number of pregnancies.
 
 ```{r bin_n_preg}
 bayes_data$n_pregnancies_bin[bayes_data$n_pregnancies == 0] <- 1
@@ -272,59 +453,79 @@ bayes_data$n_pregnancies_bin[bayes_data$n_pregnancies == 2] <- 3
 bayes_data$n_pregnancies_bin[bayes_data$n_pregnancies == 3] <- 4
 bayes_data$n_pregnancies_bin[bayes_data$n_pregnancies >= 4] <- 5
 
+# store as factor variable
 bayes_data$n_pregnancies_fac <- factor(
     bayes_data$n_pregnancies_bin, 
     levels = c(1,2,3,4,5), 
     labels = c("0", "1", "2", "3", "4+")    
 )
 
+# check coding
 table(bayes_data$n_pregnancies_fac)
 ```
 
+Bin number of years smoked.
+
 ```{r bin_years_smoke}
-bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes == 0                                  ] <- 1
-bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes >  0 & bayes_data$n_years_smokes <= 10] <- 2
-bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes > 10                                  ] <- 3
+bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes == 0 ] <- 1
+bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes >  0 & 
+                              bayes_data$n_years_smokes <= 10] <- 2
+bayes_data$n_years_smokes_bin[bayes_data$n_years_smokes >  10] <- 3
 
-
+# store as factor variable
 bayes_data$n_years_smokes_fac <- factor(
     bayes_data$n_years_smokes_bin, 
     levels = c(1,2,3), 
     labels = c("0 years", "1-10 years", "10+ years")    
 )
 
+# check coding
 table(bayes_data$n_years_smokes_fac)
 ```
 
-```{r bin_n_packs}
-bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year == 0                                  ] <- 1
-bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year > 0 & bayes_data$n_packs_per_year <= 2] <- 2
-bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year > 2 & bayes_data$n_packs_per_year <= 5] <- 3
-bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year > 5                                   ] <- 4
+Bin number of packs smoked per year.
 
+```{r bin_n_packs}
+bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year == 0] <- 1
+bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year  > 0 & 
+                                bayes_data$n_packs_per_year <= 2] <- 2
+bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year  > 2 & 
+                                bayes_data$n_packs_per_year <= 5] <- 3
+bayes_data$n_packs_per_year_bin[bayes_data$n_packs_per_year  > 5] <- 4
+
+# store as factor variable
 bayes_data$n_packs_per_year_fac <- factor(
     bayes_data$n_packs_per_year_bin, 
     levels = c(1,2,3,4), 
     labels = c("0 per year", "1-2 per year", "2-5 per year", "5+ per year")    
 )
 
+# check coding
 table(bayes_data$n_packs_per_year_fac)
 ```
 
-```{r bin years_contra}
-bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives == 0                                                 ] <- 1
-bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives > 0 & bayes_data$n_years_hormonal_contraceptives <= 2] <- 2
-bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives > 2 & bayes_data$n_years_hormonal_contraceptives <= 5] <- 3
-bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives > 5                                                  ] <- 4
+Bin number of years on hormonal contraceptives.
 
+```{r bin years_contra}
+bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives == 0] <- 1
+bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives > 0 & 
+                          bayes_data$n_years_hormonal_contraceptives <= 2] <- 2
+bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives > 2 & 
+                          bayes_data$n_years_hormonal_contraceptives <= 5] <- 3
+bayes_data$n_years_hc_bin[bayes_data$n_years_hormonal_contraceptives >  5] <- 4
+
+# store as factor variable
 bayes_data$n_years_hc_fac <- factor(
     bayes_data$n_years_hc_bin, 
     levels = c(1,2,3,4), 
     labels = c("0 years", "1-2 years", "2-5 years", "5+ years")    
 )
 
+# check coding
 table(bayes_data$n_years_hc_fac)
 ```
+
+Bin number of years with IUD.
 
 ```{r bin_years_iud}
 bayes_data$n_years_iud_bin[bayes_data$n_years_iud > 0 & bayes_data$n_years_iud <= 1] <- 1
@@ -332,23 +533,27 @@ bayes_data$n_years_iud_bin[bayes_data$n_years_iud > 1 & bayes_data$n_years_iud <
 bayes_data$n_years_iud_bin[bayes_data$n_years_iud > 2 & bayes_data$n_years_iud <= 3] <- 3
 bayes_data$n_years_iud_bin[bayes_data$n_years_iud > 3                              ] <- 4
 
+# store as factor variable
 bayes_data$n_years_iud_fac <- factor(
     bayes_data$n_years_iud_bin, 
     levels = c(1,2,3,4), 
     labels = c("0-1 years", "1-2 years", "2-3 years", "4+ years")    
 )
 
+# check coding
 table(bayes_data$n_years_iud_fac)
 ```
+
+Drop the numeric features from the Naive Bayes data set. 
 
 ```{r drop_cont_vars}
 drop_vars <- c(
     "age",
     "age_bin",
     "n_sexual_partners",
-    "n_sexual_partners_bin",
+    "n_sexual_part_bin",
     "age_first_sexual_intercourse",
-    "age_first_sexual_intercourse_bin",
+    "age_first_sexual_ic_bin",
     "n_pregnancies",
     "n_pregnancies_bin",
     "n_years_smokes",
@@ -366,71 +571,355 @@ bayes_data <- bayes_data %>%
     select(-one_of(drop_vars))
 ```
 
-```{r partition}
-n_train_obs <- floor(0.80*nrow(dx_data))
+## Modeling
 
+We will train and compare three machine learning classification models for predicting cervical cancer diagnosis The classification algorithms I will use are Naive Bayes, Decision Trees, and Logistic Regression.
+
+### Build training and testing data sets
+
+Before training the models, we need to divide the data into training and tests partitions. We will training each model with the training data and evaluate the model's performance using the test data. We cannot train and test the model using the full data set because this can lead to overfitting the model.
+
+The `caret` package contains the `createDataPartition()` function for creating training and testing subsets. This function creates balanced data partitions based on a factor in the data. Partition the the cervical cancer data into 75 percent training and 25 percent testing with balanced age.
+
+```{r sample}
 # set a seed number
 set.seed(123456789)
 
-# select 900 row indexes at random
-train_sample <- sample(nrow(dx_data), n_train_obs)
-head(train_sample)
-
-dt_train <- dx_data[ train_sample, ]
-dt_test  <- dx_data[-train_sample, ]
-
-glm_train <- cbind(dt_train, cancer = dx_labels[ train_sample])
-glm_test  <- cbind(dt_test,  cancer = dx_labels[-train_sample])
-
-nb_train <- dx_data[ train_sample, ]
-nb_test  <- dx_data[-train_sample, ]
-
-train_labels <- dx_labels[ train_sample]
-test_labels  <- dx_labels[-train_sample]
+# create balanced partitions
+samp <- createDataPartition(y = bayes_data$age_fac, p = .75, list = FALSE)
+head(samp)
 ```
 
-## Modeling
+Confirm the distribution of age in each sample is balanced.
+
+```{r check_samp}
+# training sample
+prop.table(table(bayes_data[ samp, ]$age_fac))
+
+# testing sample
+prop.table(table(bayes_data[-samp, ]$age_fac))
+```
+
+Partition the data for each model. 
+
+First, partition the target variable.
+
+```{r partition_target}
+train_labels <- dx_labels[ samp]
+test_labels  <- dx_labels[-samp]
+```
+
+Next, partition the data containing the discretized numeric variables for the Naive Bayes classifier.
+
+```{r partition_nb}
+nb_train <- bayes_data[ samp, ]
+nb_test  <- bayes_data[-samp, ]
+```
+
+Next, partition the data containing the numeric variables for the Decision Tree classifier. Decision Trees can include both numeric and categorical variables.
+
+```{r partition_dt}
+dt_train <- dx_data[ samp, ]
+dt_test  <- dx_data[-samp, ]
+```
+
+Finally, partition the data for the logistic regression classifier. For this model, we will include the target variable in the same data frame as the predictor variables.
+
+```{r partition_glm}
+glm_train <- cbind(dt_train, cancer = dx_labels[ samp])
+glm_test  <- cbind(dt_test,  cancer = dx_labels[-samp])
+```
 
 ### Naive Bayes
 
-```{r train_nb}
-nb_classifier <- naiveBayes(nb_train, train_labels)
-nb_classifier <- naiveBayes(nb_train, train_labels, laplace = 1)
-nb_test_pred <- predict(nb_classifier, nb_test)
+The Naive Bayes algorithm uses Bayesian methods to determine the most probable class for a target variable based on the likelihood of feature values in the data. Naive Bayes is an intuitive algorithm that requires little computational time to train and is robust to noisy data. One downside to Naive Bayes is that it cannot handle numeric features, so some information will be lost from discretizing numeric variables. Additionally, Naive Bayes assumes that features in the data are equally important and independent[^3]. We know this is in not the case in the cervical cancer data set. Some risk factors are highly correlated with each other, and some risk factors are likely to be more predictive of cervical cancer than others.
 
-CrossTable(
-    test_labels, 
-    nb_test_pred,
-    prop.chisq = FALSE, 
-    prop.c     = FALSE, 
-    prop.r     = FALSE,
-    dnn = c('actual dx', 'predicted dx')
-)
+[^3]: Lantz, Brett. Machine Learning with R. PACKT Publishing, 2015.
+
+We can train a Naive Bayes classifier using the `naiveBayes()` function from the `e1071` package. We can include a Laplace estimator in the model by specifying the `laplace = 1` parameter. A Laplace estimator is a small number (typically 1) that is added to the frequency of each value in the data. This is done to ensure that each feature has a non-zero probability of occurring. By adding a Laplace estimator, each class-feature combination will appear at least once. This is an important step for the cervical cancer classifier since we know that some of the indicators of STDs appear very infrequently.    
+
+
+```{r train_nb}
+nb_classifier <- naiveBayes(nb_train, train_labels, laplace = 1)
+summary(nb_classifier)
 ```
 
 ### Decision Tree
 
-```{r train_dtree}
-dt_classifier <- C5.0(dt_train, train_labels)
-summary(dt_classifier)
+Decision Tree models use a tree structure to establish relationships between feature classes and outcomes. The model uses a recursive partitioning to split data repeatedly into subsets until a stopping criteria for an outcome is met. Unlike Naive Bayes, decision trees can easily handle both numeric and categorical features and can exclude features that are unimportant. Decision trees also create human-readable rules that can be easily documented and audited. This would be an important a cervical cancer classifier since the model includes sensitive information that could be used by entities like insurance companies to discriminate against consumers purchasing health insurance. A downside of decisions tree is that they are prone to overfitting, which can result in many, overly complex rules that may not make intuitive sense[^3].
 
+We can train a decision tree classifier using the C5.0 algorithm from the `C50` package. By setting the `trials` parameter in in the function, we can add adaptive boosting to the decision tree model. Adaptive boosting is the process of estimating multiple models, then reconciling a final outcome through a voting mechanism. By setting the `trials` parameter to 10 sets in the decision tree classifier, we set 10 as the upper limit for the number of decision trees estimated for the boosted model.
+
+```{r train_dtree}
+set.seed(123)
 dt_classifier <- C5.0(dt_train, train_labels, trials = 10)
 dt_classifier
-
-dt_test_pred <- predict(dt_classifier, dt_test)
-
-CrossTable(
-    test_labels, 
-    dt_test_pred,
-    prop.chisq = FALSE, 
-    prop.c     = FALSE, 
-    prop.r     = FALSE,
-    dnn = c('actual dx', 'predicted dx')
-)
 ```
+
+We can see that although 10 boosting iterations were requested, only one was used do to early stopping to prevent overfitting.
+
+We may instead be able to improve the decision tree by adding a cost matrix. A cost matrix can be added to the C5.0 model to specify what type of errors are the most costly. In our example, it is more costly for a patient to have a false negative. That is, it is more risky predict that a patient will not be diagnosed with cervical cancer when they actually have it.
+
+First, create the dimensions of the cost matrix.
+
+```{r matrix_names}
+matrix_dimensions <- list(
+    c("no", "yes"), 
+    c("no", "yes")
+)
+names(matrix_dimensions) <- c("predicted", "actual")
+```
+
+Next, add values to the cost matrix. Set a higher cost (4) for predicting `no` when the diagnosis is `yes`. 
+
+```{r matrix_errors}
+error_cost <- matrix(c(0, 1, 4, 0), nrow = 2, dimnames = matrix_dimensions)
+error_cost
+```
+
+Re-train the model with the cost matrix.
+
+```{r train_dtree_cost}
+set.seed(123)
+dt_classifier <- C5.0(dt_train, train_labels, costs = error_cost)
+dt_classifier
+```
+
+### Logistic Regression
+
+Logistic regression is a type of regression that can be used to model a binary outcome. Regression models can be used for prediction but they can also help users understand the size and direction of relationships between predictors and the outcome. Running a logistic regression of cervical cancer diagnosis on all of its risk factors will help us understand which risk factors have the strongest relationship to having cervical cancer.
+
+Run a logistic regression of `cancer` on all of the risk factor features in the training data set. We can see that many of the predictors in the model are not statistically significant. That is, they have p-values greater than significance level alpha = 0.05.
+
+
+```{r train_glm}
+glm_mod <- glm(cancer ~ ., data = glm_train, family = "binomial")
+summary(glm_mod)
+```
+
+We can use stepwise backward elimination to find the best regression model. For each step, the least significant predictor will be removed until the model with the fewest predictors that does not diminish the model's explanatory power is obtained. Stepwise backward elimination can be implement in R using the `step()` function.
+
+```{r back_step, warning=FALSE}
+glm_classifier <- step(glm_mod, direction = "backward", trace = FALSE)
+```
+
+The final model is:
+
+```{r final_glm_mod}
+summary(glm_classifier)
+```
+
+As expected, the most significant predictor of cervical cancer is a previous HPV diagnosis. This is followed by the number of years a patient smoked and the number of years that a patient used hormonal contraceptives. None of the variables related to STD status are significant in the model.
 
 ## Evaluation
 
+The three cervical cancer classifiers can be evaluated by using each classifier to predict cervical cancer diagnosis status for the test data. The predicted values for the test data can be compare to the actual values from the test data to gauge the model's performance.
+
+First, predict cervical cancer status using each classifier. This can be done using the `predict()` function for the Naive Bayes and decision tree classifiers.
+
+```{r predict_nb}
+nb_test_pred <- predict(nb_classifier, nb_test)
+
+# Naive Bayes predictions
+head(nb_test_pred)
+```
+
+```{r predict_dt}
+dt_test_pred  <- predict(dt_classifier, dt_test)
+
+# Decision Tree predictions
+head(dt_test_pred)
+```
+
+To predict cervical cancer status using the logistic regression classifier, pull the fitted values (predicted probabilities of cervical cancer) from the regression. Then, set a probability threshold. If the predicted probability is greater than 0.5, then we will predict that the patient is diagnosed with cervical cancer.
+
+```{r predict_glm}
+fits          <- predict(glm_classifier, glm_test, type = "response")
+glm_pred      <- ifelse(fits > 0.5, 1, 0)
+glm_test_pred <- factor(glm_pred, levels = c(0,1), labels = c("no","yes"))
+
+# Logistic regression predictions
+head(glm_test_pred)
+```
+
+### Accuracy
+
+The first evaluation method is model accuracy. Accuracy is calculated as the percent of observations predicted correctly. Additionally, we can use a confusion matrix to display the number of correct and incorrect predictions for each classifier. The `CrossTable()` function from the `gmodels` package can be used to generate the confusion matrix for each classifier.
+
+Define a function to run the `CrossTable()` function for each classifier.
+
+```{r run_confusion_fun}
+run_CrossTable <- function(pred) {
+    CrossTable(
+        test_labels, 
+        pred,
+        prop.chisq = FALSE, 
+        prop.c     = FALSE, 
+        prop.r     = FALSE,
+        dnn = c('actual dx', 'predicted dx')
+    )
+}
+```
+
+Define a function to calculate the percentage of correct predictions.
+
+```{r calc_acc_fun}
+calculate_accuracy <- function(pred) {
+    return(round(100*mean(test_labels == pred), digits = 1))
+}
+```
+
+Run functions for the Naive Bayes classifier.
+
+```{r eval_nb}
+# runs Confusion Maxtrix
+run_CrossTable(nb_test_pred)
+
+# calculates accuracy
+nb_acc <- calculate_accuracy(nb_test_pred)
+nb_acc
+```
+
+The accuracy of the Naive Bayes classifier on the test data is `r nb_acc`. The model had `r sum(test_labels != nb_test_pred & test_labels == "yes")` false negatives. That is, in `r sum(test_labels != nb_test_pred & test_labels == "yes")` cases, the classifier predicted no cervical cancer when the patient was diagnosed with cervical cancer. 
+
+Run functions for the Decision Tree classifier.
+
+```{r eval_dt}
+# runs Confusion Maxtrix
+run_CrossTable(dt_test_pred)
+
+# calculates accuracy
+dt_acc <- calculate_accuracy(dt_test_pred)
+dt_acc
+```
+
+The accuracy of the Decision Tree classifier on the test data is `r dt_acc`. This is a lower performance than the Naive Bayes classifier. However, the model had only `r sum(test_labels != dt_test_pred & test_labels == "yes")` had false negatives. The Decision Tree classier with the cost matrix had fewer false negatives than the Naive Bayes classier. 
+
+Run functions for the Logistic regression classifier.
+
+```{r eval_glm}
+# runs Confusion Maxtrix
+run_CrossTable(glm_test_pred)
+
+# calculates accuracy
+glm_acc <- calculate_accuracy(glm_test_pred)
+glm_acc
+```
+
+Finally, the accuracy of the logistic regression classifier on the test data is `r glm_acc`. This is a similar performance to the Naive Bayes classifier. However, the logistic regression had the most false negatives (`r sum(test_labels != glm_test_pred & test_labels == "yes")`).
+
+### AUC
+
+We can also evaluate performance using AUC. The AUC is the area under the ROC curve. The ROC curve is a plot of true positive rate against the false positive rate for a classification model. The ROC curve can be generated using the `roc()` function from the `pROC` package. The `auc()` function is then used to return the area under the curve.
+
+First, convert the predictions to numeric vectors.
+
+```{r}
+nb_test_pred_n  <- ifelse(nb_test_pred  == "yes", 1, 0)
+dt_test_pred_n  <- ifelse(dt_test_pred  == "yes", 1, 0)
+glm_test_pred_n <- ifelse(glm_test_pred == "yes", 1, 0)
+test_labels_n   <- ifelse(test_labels   == "yes", 1, 0)
+
+table(test_labels_n, test_labels)
+```
+
+Then generate their ROC curves.
+
+```{r}
+nb_roc  <- roc(test_labels_n, nb_test_pred_n)
+dt_roc  <- roc(test_labels_n, dt_test_pred_n)
+glm_roc <- roc(test_labels_n, glm_test_pred_n)
+```
+
+Then calculate the AUC for each model.
+
+```{r}
+# Naive Bayes
+nb_auc <- auc(nb_roc)
+nb_auc
+
+# Decision Tree
+dt_auc <- auc(dt_roc)
+dt_auc
+
+# Logistic regression
+glm_auc <- auc(glm_roc)
+glm_auc
+```
+
+The Naive Bayes classifier's AUC is highest (`r nb_auc`). This indicates that it had the better performance. That is, it has the highest probability of a true positive of the three classifiers. Despite having the worst accuracy, the Decision Tree classifier had basically the same AUC as the logistic regression.
 
 ## Deployment
+
+The cervical cancer classifier will be deployed as a model ensemble. A model ensemble is a prediction model that is an aggregate of a set of models. Specifically, a model ensemble aggregates predictions across all the individual models in the ensemble using a voting mechanism. In general, we expect that a collection of independent models would perform better than any individual model.
+
+The voting mechanism that will be used for the cervical cancer ensemble is the mode prediction for an patient across the three models. 
+
+Define a function to calculate the mode across values.
+
+```{r mode_fun}
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+```
+
+Next, define a function to loop through the observations in the test data and generate the modal prediction for each observation across the three classifiers.
+
+```{r vote_fun}
+vote <- function (p1, p2, p3) {
+        
+    m  <- length(p1) # number of predictions in the test data
+    ds <- numeric(m) # creates numeric vector to hold final prediction 
+    
+    # loops through predictions in the test data
+    for (i in 1:m) {
+        # calculate mode prediction for an obs across classifiers
+        p     <- c(p1[i],p2[i],p3[i]) 
+        # store modal prediction in return vector
+        ds[i] <- Mode(p)
+    }
+    
+    # return vector
+    return(ds)
+}
+```
+
+Use functions to generate the model ensemble.
+
+```{r ens_pred}
+ens_pred      <- vote(p1 = nb_test_pred_n, p2 = dt_test_pred_n, p3 = glm_test_pred_n)
+ens_test_pred <- factor(ens_pred, levels = c(0,1), labels = c("no","yes"))
+
+# Model ensemble predictions
+head(ens_test_pred)
+```
+
+Run the accuracy function and confusion matrix for the model ensemble. 
+
+```{r eval_ens}
+# runs Confusion Maxtrix
+run_CrossTable(ens_test_pred)
+
+# calculates accuracy
+ens_acc <- calculate_accuracy(ens_test_pred)
+ens_acc
+```
+
+Calculate the AUC for the model ensemble.
+
+```{r ens_auc}
+# convert to numeric vector
+ens_test_pred_n <- ifelse(ens_test_pred  == "yes", 1, 0)
+
+# generate ROC curve
+ens_roc <- roc(test_labels_n, ens_test_pred_n)
+
+# calculate AUC
+ens_auc <- auc(ens_roc)
+ens_auc
+```
+
+The accuracy of the model ensemble is `r ens_acc` percent. This higher than the Naive Bayes classifier (`r nb_acc` percent) but not as high as the Logistic regression classifier (`r glm_acc` percent). The model ensemble had `r sum(test_labels != ens_test_pred & test_labels == "yes")` false negatives. This is more than the Decision Tree classifier with the cost matrix (`r sum(test_labels != dt_test_pred & test_labels == "yes")`). However, the model ensemble does have just as high of an AUC as the other classifiers (`r ens_auc`). This indicates that the model ensemble performs very similar and in some cases better than the individual models.
+
 
